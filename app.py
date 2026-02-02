@@ -4,77 +4,27 @@ import yt_dlp
 import time
 from datetime import datetime
 import random
-import hashlib
-from urllib.parse import urlparse
-import os
-
-DEVELOPER = "ERRIOR"
 
 app = Flask(__name__)
+CORS(app)
 
-# Configure CORS for Vercel
-CORS(app, origins=["*"], methods=["GET", "POST"], allow_headers=["*"])
-
-# Cache for frequently requested videos (simplified for Vercel)
-cache = {}
-CACHE_TIMEOUT = 300
-MAX_CACHE_SIZE = 50  # Lower for Vercel serverless
-
-def success_response(data, cache_hit=False):
-    response = {
-        "success": True,
-        "developer": DEVELOPER,
-        "timestamp": datetime.utcnow().isoformat(),
-        "cache": cache_hit,
-        "data": data
-    }
-    return response
-
-def error_response(message):
-    return {
-        "success": False,
-        "developer": DEVELOPER,
-        "timestamp": datetime.utcnow().isoformat(),
-        "error": message
-    }
-
-def cleanup_cache():
-    """Clean up old cache entries"""
-    current_time = time.time()
-    keys_to_remove = []
-    
-    # Remove expired cache
-    for key, (_, timestamp) in cache.items():
-        if current_time - timestamp > CACHE_TIMEOUT:
-            keys_to_remove.append(key)
-    
-    # Remove if cache too large
-    if len(cache) > MAX_CACHE_SIZE:
-        # Sort by timestamp (oldest first)
-        sorted_keys = sorted(cache.keys(), key=lambda k: cache[k][1])
-        keys_to_remove.extend(sorted_keys[:20])
-    
-    # Remove duplicates and delete
-    keys_to_remove = list(set(keys_to_remove))
-    for key in keys_to_remove:
-        del cache[key]
-
-class AdvancedCloudDownloader:
+class UserIPDownloader:
     def __init__(self):
         self.user_agents = [
             'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
             'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0',
+            'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
         ]
-        
+    
     def get_user_ip(self):
-        """Extract user's IP from request headers (Vercel compatible)"""
+        """Get user's real IP from Vercel headers"""
         ip = request.headers.get('X-Forwarded-For', '').split(',')[0].strip()
         if not ip:
             ip = request.headers.get('X-Real-IP', '')
-        return ip or 'unknown'
+        return ip or request.remote_addr or 'unknown'
     
     def get_user_headers(self):
-        """Generate headers"""
+        """Generate headers with user's IP and User-Agent"""
         user_ip = self.get_user_ip()
         user_agent = request.headers.get('User-Agent', random.choice(self.user_agents))
         
@@ -83,191 +33,56 @@ class AdvancedCloudDownloader:
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
             'Accept-Language': 'en-US,en;q=0.5',
             'Accept-Encoding': 'gzip, deflate',
-            'Cache-Control': 'max-age=0'
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1',
+            'Sec-Fetch-Dest': 'document',
+            'Sec-Fetch-Mode': 'navigate',
+            'Sec-Fetch-Site': 'none',
+            'Sec-Fetch-User': '?1',
+            'Cache-Control': 'max-age=0',
+            # Add user IP to headers to avoid bot detection
+            'X-Forwarded-For': user_ip,
+            'X-Real-IP': user_ip,
+            'X-Client-IP': user_ip,
+            'CF-Connecting-IP': user_ip,
+            'True-Client-IP': user_ip
         }
-        
         return headers
-    
-    def generate_cache_key(self, url, format_type):
-        """Generate cache key for URL"""
-        cache_str = f"{url}_{format_type}"
-        return hashlib.md5(cache_str.encode()).hexdigest()
-    
-    def process_url(self, url, format_type='best'):
-        # Validate URL
-        if not url or '://' not in url:
-            return error_response("Invalid URL format")
-        
-        cache_key = self.generate_cache_key(url, format_type)
-        
-        # Check cache first
-        if cache_key in cache:
-            cached_data, timestamp = cache[cache_key]
-            if time.time() - timestamp < CACHE_TIMEOUT:
-                return success_response(cached_data, cache_hit=True)
-        
-        start_time = time.time()
-        
-        try:
-            user_headers = self.get_user_headers()
-            
-            # Simplified YT-DLP options for Vercel compatibility
-            ydl_opts = {
-                'quiet': True,
-                'no_warnings': True,
-                'simulate': True,
-                'skip_download': True,
-                'format': format_type,
-                'socket_timeout': 10,
-                'extractor_retries': 1,
-                'retries': 2,
-                'ignoreerrors': True,
-                'http_headers': user_headers,
-                'cachedir': False,
-                'no_color': True,
-                'no_call_home': True,
-                'no_check_certificate': True,
-                'verbose': False
-            }
-            
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(url, download=False)
-                
-                if not info:
-                    return error_response("No video information found")
-                
-                if 'entries' in info and info['entries']:
-                    return self._process_playlist(info, url, start_time)
-                else:
-                    return self._process_video(info, url, start_time)
-                
-        except yt_dlp.utils.DownloadError as e:
-            if 'Unsupported URL' in str(e):
-                return error_response("Unsupported URL or platform")
-            return error_response("Download error")
-        except Exception as e:
-            error_msg = str(e)
-            if len(error_msg) > 80:
-                error_msg = error_msg[:80] + "..."
-            return error_response(f"Processing error: {error_msg}")
-    
-    def _process_video(self, info, url, start_time):
-        """Process single video"""
-        formats = []
-        if 'formats' in info:
-            for fmt in info.get('formats', [])[:8]:  # Limit formats
-                if fmt.get('url'):
-                    format_info = {
-                        'format_id': fmt.get('format_id', 'unknown'),
-                        'ext': fmt.get('ext', 'mp4'),
-                        'resolution': fmt.get('resolution', 'N/A'),
-                        'filesize_mb': round(fmt.get('filesize', 0) / (1024*1024), 2) if fmt.get('filesize') else 0,
-                        'url': fmt['url']
-                    }
-                    formats.append(format_info)
-        
-        # Sort by filesize
-        formats.sort(key=lambda x: x.get('filesize_mb', 0), reverse=True)
-        
-        result = {
-            'type': 'video',
-            'platform': self._detect_platform(url),
-            'title': info.get('title', 'Unknown'),
-            'duration': info.get('duration', 0),
-            'duration_formatted': self._format_duration(info.get('duration', 0)),
-            'thumbnail': info.get('thumbnail'),
-            'uploader': info.get('uploader', 'Unknown'),
-            'formats': formats[:3],  # Limit to 3 formats for Vercel
-            'webpage_url': info.get('webpage_url'),
-            'processing_time': round(time.time() - start_time, 2),
-        }
-        
-        # Cache the result
-        cache_key = self.generate_cache_key(url, 'best')
-        cache[cache_key] = (result, time.time())
-        cleanup_cache()
-        
-        return success_response(result)
-    
-    def _process_playlist(self, info, url, start_time):
-        """Process playlist"""
-        videos = []
-        
-        # Limit to 3 videos for Vercel
-        for idx, entry in enumerate(info.get('entries', [])[:3]):
-            if entry:
-                videos.append({
-                    'index': idx + 1,
-                    'title': entry.get('title', f'Video {idx+1}')[:50],
-                    'duration': entry.get('duration', 0),
-                    'video_id': entry.get('id'),
-                })
-        
-        result = {
-            'type': 'playlist',
-            'platform': self._detect_platform(url),
-            'playlist_title': info.get('title', 'Unknown Playlist')[:100],
-            'video_count': len(videos),
-            'videos': videos,
-            'processing_time': round(time.time() - start_time, 2),
-        }
-        
-        # Cache the result
-        cache_key = self.generate_cache_key(url, 'best')
-        cache[cache_key] = (result, time.time())
-        cleanup_cache()
-        
-        return success_response(result)
-    
-    def _detect_platform(self, url):
-        url_lower = url.lower()
-        if 'youtube.com' in url_lower or 'youtu.be' in url_lower:
-            return 'YouTube'
-        elif 'instagram.com' in url_lower:
-            return 'Instagram'
-        elif 'tiktok.com' in url_lower:
-            return 'TikTok'
-        elif 'twitter.com' in url_lower or 'x.com' in url_lower:
-            return 'Twitter/X'
-        elif 'facebook.com' in url_lower:
-            return 'Facebook'
-        return 'Other'
-    
-    def _format_duration(self, seconds):
-        """Format duration in seconds to MM:SS or HH:MM:SS"""
-        if not seconds:
-            return "00:00"
-        
-        hours = seconds // 3600
-        minutes = (seconds % 3600) // 60
-        secs = seconds % 60
-        
-        if hours > 0:
-            return f"{hours:02d}:{minutes:02d}:{secs:02d}"
-        else:
-            return f"{minutes:02d}:{secs:02d}"
 
-downloader = AdvancedCloudDownloader()
+downloader = UserIPDownloader()
+
+def success_response(data):
+    return {
+        "success": True,
+        "timestamp": datetime.utcnow().isoformat(),
+        "data": data
+    }
+
+def error_response(message):
+    return {
+        "success": False,
+        "timestamp": datetime.utcnow().isoformat(),
+        "error": message
+    }
 
 @app.route('/')
 def index():
-    """Homepage"""
+    user_ip = downloader.get_user_ip()
     return jsonify({
-        "developer": DEVELOPER,
         "message": "Social Media Downloader API",
-        "timestamp": datetime.utcnow().isoformat(),
+        "your_ip": user_ip,
+        "note": "Using YOUR IP address to avoid bot detection",
         "endpoints": {
-            "download": "/download?url=YOUR_URL",
-            "formats": "/formats?url=YOUR_URL",
-            "info": "/info?url=YOUR_URL",
-            "test": "/test"
+            "download": "/download?url=YOUTUBE_URL",
+            "formats": "/formats?url=YOUTUBE_URL",
+            "info": "/info?url=YOUTUBE_URL"
         },
-        "example": "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+        "example": "/download?url=https://www.youtube.com/watch?v=dQw4w9WgXcQ"
     })
 
 @app.route('/download')
 def download():
-    """Main download endpoint"""
+    """Download video - USING USER'S IP"""
     url = request.args.get('url')
     if not url:
         return jsonify(error_response("URL parameter is required")), 400
@@ -275,14 +90,101 @@ def download():
     format_type = request.args.get('format', 'best')
     
     try:
-        result = downloader.process_url(url, format_type)
-        return jsonify(result)
+        # Get user's headers with their IP
+        user_headers = downloader.get_user_headers()
+        
+        ydl_opts = {
+            'quiet': True,
+            'no_warnings': True,
+            'simulate': True,
+            'skip_download': True,
+            'format': format_type,
+            'socket_timeout': 15,
+            'extractor_retries': 2,
+            'retries': 3,
+            'ignoreerrors': False,
+            'http_headers': user_headers,
+            'cookiefile': None,
+            'no_color': True,
+            'no_call_home': True,
+            'no_check_certificate': True,
+            'verbose': False,
+            # YouTube specific settings
+            'extractor_args': {
+                'youtube': {
+                    'player_client': ['android', 'web'],
+                    'player_skip': ['configs']
+                }
+            }
+        }
+        
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+            
+            # Get direct video URL
+            formats = []
+            if 'formats' in info:
+                for fmt in info.get('formats', []):
+                    if fmt.get('url'):
+                        formats.append({
+                            'format_id': fmt.get('format_id'),
+                            'ext': fmt.get('ext'),
+                            'resolution': fmt.get('resolution'),
+                            'url': fmt['url'],
+                            'filesize_mb': round(fmt.get('filesize', 0) / (1024*1024), 2) if fmt.get('filesize') else 0
+                        })
+            
+            result = {
+                'title': info.get('title', 'Unknown'),
+                'url': info.get('webpage_url', url),
+                'thumbnail': info.get('thumbnail'),
+                'duration': info.get('duration', 0),
+                'uploader': info.get('uploader', 'Unknown'),
+                'user_ip_used': downloader.get_user_ip(),
+                'formats': formats[:5],  # Limit to 5 formats
+                'direct_url': formats[0]['url'] if formats else None
+            }
+            
+            return jsonify(success_response(result))
+            
     except Exception as e:
-        return jsonify(error_response("Internal server error")), 500
+        error_msg = str(e)
+        # Try fallback without extractor args
+        try:
+            return fallback_download(url, downloader)
+        except:
+            return jsonify(error_response(f"Error: {error_msg[:100]}")), 500
+
+def fallback_download(url, downloader):
+    """Fallback method if main method fails"""
+    user_headers = downloader.get_user_headers()
+    
+    ydl_opts = {
+        'quiet': True,
+        'simulate': True,
+        'skip_download': True,
+        'format': 'best[ext=mp4]',
+        'http_headers': user_headers
+    }
+    
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(url, download=False)
+        
+        result = {
+            'title': info.get('title', 'Unknown'),
+            'url': info.get('webpage_url', url),
+            'thumbnail': info.get('thumbnail'),
+            'duration': info.get('duration', 0),
+            'uploader': info.get('uploader', 'Unknown'),
+            'user_ip_used': downloader.get_user_ip(),
+            'note': 'Using fallback method'
+        }
+        
+        return jsonify(success_response(result))
 
 @app.route('/formats')
 def formats():
-    """Get available formats"""
+    """Get all available formats - USING USER'S IP"""
     url = request.args.get('url')
     if not url:
         return jsonify(error_response("URL parameter is required")), 400
@@ -294,8 +196,9 @@ def formats():
             'quiet': True,
             'simulate': True,
             'skip_download': True,
+            'listformats': True,
             'http_headers': user_headers,
-            'listformats': True
+            'ignoreerrors': True
         }
         
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -303,28 +206,34 @@ def formats():
             
             formats_list = []
             if 'formats' in info:
-                for fmt in info['formats'][:6]:  # Limit
-                    formats_list.append({
-                        'id': fmt.get('format_id'),
-                        'ext': fmt.get('ext'),
-                        'resolution': fmt.get('resolution'),
-                        'filesize_mb': round(fmt.get('filesize', 0) / (1024*1024), 2) if fmt.get('filesize') else 0,
-                    })
+                for fmt in info['formats']:
+                    if fmt.get('url'):
+                        formats_list.append({
+                            'id': fmt.get('format_id'),
+                            'ext': fmt.get('ext'),
+                            'resolution': fmt.get('resolution'),
+                            'filesize_mb': round(fmt.get('filesize', 0) / (1024*1024), 2) if fmt.get('filesize') else 0,
+                            'url': fmt['url'],
+                            'vcodec': fmt.get('vcodec'),
+                            'acodec': fmt.get('acodec')
+                        })
             
             result = {
-                'url': url,
                 'title': info.get('title'),
-                'formats': formats_list,
+                'url': url,
+                'your_ip': downloader.get_user_ip(),
+                'formats_count': len(formats_list),
+                'formats': formats_list[:10]  # Limit to 10 formats
             }
             
             return jsonify(success_response(result))
             
     except Exception as e:
-        return jsonify(error_response("Failed to get formats")), 500
+        return jsonify(error_response(f"Failed: {str(e)[:100]}")), 500
 
 @app.route('/info')
 def info():
-    """Get video info"""
+    """Get video info - USING USER'S IP"""
     url = request.args.get('url')
     if not url:
         return jsonify(error_response("URL parameter is required")), 400
@@ -347,50 +256,41 @@ def info():
                 'duration': info.get('duration'),
                 'uploader': info.get('uploader'),
                 'view_count': info.get('view_count'),
+                'like_count': info.get('like_count'),
                 'thumbnail': info.get('thumbnail'),
-                'platform': downloader._detect_platform(url)
+                'webpage_url': info.get('webpage_url'),
+                'your_ip': downloader.get_user_ip()
             }
             
             return jsonify(success_response(result))
             
     except Exception as e:
-        return jsonify(error_response("Failed to get info")), 500
+        return jsonify(error_response(f"Failed: {str(e)[:100]}")), 500
 
 @app.route('/test')
 def test():
-    """Test endpoint"""
+    """Test endpoint to show your IP"""
+    user_ip = downloader.get_user_ip()
     return jsonify({
-        "status": "active",
-        "developer": DEVELOPER,
-        "timestamp": datetime.utcnow().isoformat(),
-        "environment": os.getenv('VERCEL_ENV', 'development'),
-        "cache_size": len(cache)
-    })
-
-@app.route('/clear-cache')
-def clear_cache():
-    """Clear cache endpoint"""
-    global cache
-    cache.clear()
-    return jsonify({
-        "success": True,
-        "message": "Cache cleared",
-        "timestamp": datetime.utcnow().isoformat()
+        "status": "API is running",
+        "your_ip": user_ip,
+        "user_agent": request.headers.get('User-Agent'),
+        "headers_used": {
+            'X-Forwarded-For': request.headers.get('X-Forwarded-For'),
+            'X-Real-IP': request.headers.get('X-Real-IP')
+        },
+        "note": "This IP will be used for all downloads to avoid bot detection"
     })
 
 # Error handlers
 @app.errorhandler(404)
 def not_found(e):
-    return jsonify(error_response("Endpoint not found. Try / for available endpoints")), 404
+    return jsonify(error_response("Endpoint not found")), 404
 
 @app.errorhandler(500)
 def server_error(e):
     return jsonify(error_response("Internal server error")), 500
 
-@app.errorhandler(400)
-def bad_request(e):
-    return jsonify(error_response("Bad request. Check your parameters")), 400
-
 # This is needed for Vercel
 if __name__ == '__main__':
-    app.run(debug=False, host='0.0.0.0', port=3000)
+    app.run(debug=False)
