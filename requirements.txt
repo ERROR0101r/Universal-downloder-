@@ -1,2 +1,2 @@
 flask==2.3.3
-yt-dlp==2024.7.23
+yt-dlp==2024.4.9  # Older stable version
