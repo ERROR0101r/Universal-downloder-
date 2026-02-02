@@ -6,15 +6,19 @@ from datetime import datetime
 import random
 import hashlib
 from urllib.parse import urlparse
+import os
 
-DEVELOPER = "ERROR"
+DEVELOPER = "ERRIOR"
 
 app = Flask(__name__)
-CORS(app)
 
-# Cache for frequently requested videos
+# Configure CORS for Vercel
+CORS(app, origins=["*"], methods=["GET", "POST"], allow_headers=["*"])
+
+# Cache for frequently requested videos (simplified for Vercel)
 cache = {}
 CACHE_TIMEOUT = 300
+MAX_CACHE_SIZE = 50  # Lower for Vercel serverless
 
 def success_response(data, cache_hit=False):
     response = {
@@ -34,30 +38,43 @@ def error_response(message):
         "error": message
     }
 
+def cleanup_cache():
+    """Clean up old cache entries"""
+    current_time = time.time()
+    keys_to_remove = []
+    
+    # Remove expired cache
+    for key, (_, timestamp) in cache.items():
+        if current_time - timestamp > CACHE_TIMEOUT:
+            keys_to_remove.append(key)
+    
+    # Remove if cache too large
+    if len(cache) > MAX_CACHE_SIZE:
+        # Sort by timestamp (oldest first)
+        sorted_keys = sorted(cache.keys(), key=lambda k: cache[k][1])
+        keys_to_remove.extend(sorted_keys[:20])
+    
+    # Remove duplicates and delete
+    keys_to_remove = list(set(keys_to_remove))
+    for key in keys_to_remove:
+        del cache[key]
+
 class AdvancedCloudDownloader:
     def __init__(self):
         self.user_agents = [
             'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
             'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0',
-            'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Mozilla/5.0 (iPhone; CPU iPhone OS 17_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Mobile/15E148 Safari/604.1',
-            'Mozilla/5.0 (Linux; Android 13; SM-S901U) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.6099.144 Mobile Safari/537.36'
         ]
         
     def get_user_ip(self):
-        """Extract user's IP from request headers"""
-        # For Vercel, use CF-Connecting-IP or X-Real-IP
-        ip = request.headers.get('CF-Connecting-IP', '')
-        if not ip:
-            ip = request.headers.get('X-Forwarded-For', '').split(',')[0].strip()
+        """Extract user's IP from request headers (Vercel compatible)"""
+        ip = request.headers.get('X-Forwarded-For', '').split(',')[0].strip()
         if not ip:
             ip = request.headers.get('X-Real-IP', '')
-        if not ip:
-            ip = request.remote_addr
         return ip or 'unknown'
     
     def get_user_headers(self):
-        """Generate headers based on user's IP and request"""
+        """Generate headers"""
         user_ip = self.get_user_ip()
         user_agent = request.headers.get('User-Agent', random.choice(self.user_agents))
         
@@ -66,30 +83,21 @@ class AdvancedCloudDownloader:
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
             'Accept-Language': 'en-US,en;q=0.5',
             'Accept-Encoding': 'gzip, deflate',
-            'DNT': '1',
-            'Connection': 'keep-alive',
-            'Upgrade-Insecure-Requests': '1',
-            'Sec-Fetch-Dest': 'document',
-            'Sec-Fetch-Mode': 'navigate',
-            'Sec-Fetch-Site': 'none',
-            'Sec-Fetch-User': '?1',
-            'Cache-Control': 'max-age=0',
-            'X-Forwarded-For': user_ip,
-            'X-Real-IP': user_ip,
-            'CF-Connecting-IP': user_ip,
-            'Referer': 'https://www.google.com/',
-            'Origin': 'https://www.google.com'
+            'Cache-Control': 'max-age=0'
         }
         
         return headers
     
     def generate_cache_key(self, url, format_type):
         """Generate cache key for URL"""
-        user_ip = self.get_user_ip()
-        cache_str = f"{url}_{format_type}_{user_ip}"
+        cache_str = f"{url}_{format_type}"
         return hashlib.md5(cache_str.encode()).hexdigest()
     
     def process_url(self, url, format_type='best'):
+        # Validate URL
+        if not url or '://' not in url:
+            return error_response("Invalid URL format")
+        
         cache_key = self.generate_cache_key(url, format_type)
         
         # Check cache first
@@ -103,229 +111,111 @@ class AdvancedCloudDownloader:
         try:
             user_headers = self.get_user_headers()
             
+            # Simplified YT-DLP options for Vercel compatibility
             ydl_opts = {
                 'quiet': True,
                 'no_warnings': True,
-                'extract_flat': False,
                 'simulate': True,
                 'skip_download': True,
-                'geturl': True,
                 'format': format_type,
-                'socket_timeout': 30,
-                'extractor_retries': 3,
-                'fragment_retries': 10,
-                'retries': 10,
-                'skip_unavailable_fragments': True,
+                'socket_timeout': 10,
+                'extractor_retries': 1,
+                'retries': 2,
                 'ignoreerrors': True,
-                'force_generic_extractor': False,
-                'cookiefile': None,
                 'http_headers': user_headers,
-                'extractor_args': {
-                    'youtube': {
-                        'player_client': ['android', 'web'],
-                        'player_skip': ['configs'],
-                        'skip': ['hls', 'dash']
-                    },
-                    'instagram': {
-                        'web': True,
-                        'login': False
-                    },
-                    'twitter': {
-                        'cards': True,
-                        'api': 'graphql'
-                    },
-                    'facebook': {
-                        'web': True,
-                        'login': False
-                    },
-                    'tiktok': {
-                        'web': True,
-                        'app': True
-                    }
-                }
+                'cachedir': False,
+                'no_color': True,
+                'no_call_home': True,
+                'no_check_certificate': True,
+                'verbose': False
             }
-            
-            # Add referer from original URL
-            parsed_url = urlparse(url)
-            if parsed_url.netloc:
-                ydl_opts['http_headers']['Referer'] = f'https://{parsed_url.netloc}'
-                ydl_opts['http_headers']['Origin'] = f'https://{parsed_url.netloc}'
             
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(url, download=False)
                 
-                platform = self._detect_platform(url)
+                if not info:
+                    return error_response("No video information found")
                 
-                if 'entries' in info:
-                    return self._process_playlist(info, url, platform, start_time, user_headers)
+                if 'entries' in info and info['entries']:
+                    return self._process_playlist(info, url, start_time)
                 else:
-                    return self._process_video(info, url, platform, start_time, user_headers)
+                    return self._process_video(info, url, start_time)
                 
+        except yt_dlp.utils.DownloadError as e:
+            if 'Unsupported URL' in str(e):
+                return error_response("Unsupported URL or platform")
+            return error_response("Download error")
         except Exception as e:
-            # Try fallback method for YouTube
-            if 'youtube' in url.lower():
-                return self._youtube_fallback(url, start_time)
-            return error_response(f"Processing failed: {str(e)[:200]}")
+            error_msg = str(e)
+            if len(error_msg) > 80:
+                error_msg = error_msg[:80] + "..."
+            return error_response(f"Processing error: {error_msg}")
     
-    def _youtube_fallback(self, url, start_time):
-        """Fallback method for YouTube when main method fails"""
-        try:
-            user_headers = self.get_user_headers()
-            
-            ydl_opts = {
-                'quiet': True,
-                'no_warnings': True,
-                'extract_flat': True,
-                'simulate': True,
-                'skip_download': True,
-                'format': 'worst',
-                'socket_timeout': 20,
-                'http_headers': user_headers,
-                'extractor_args': {
-                    'youtube': {
-                        'player_client': ['android'],
-                        'skip': ['hls', 'dash', 'configs']
-                    }
-                }
-            }
-            
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(url, download=False)
-                
-                video_url = info.get('url') or f"https://youtube.com/watch?v={info.get('id')}"
-                
-                result = {
-                    'type': 'video',
-                    'platform': 'YouTube',
-                    'title': info.get('title', 'YouTube Video'),
-                    'duration': info.get('duration', 0),
-                    'thumbnail': info.get('thumbnail'),
-                    'uploader': info.get('uploader', 'Unknown'),
-                    'video_id': info.get('id'),
-                    'note': 'Using fallback method',
-                    'processing_time': round(time.time() - start_time, 2),
-                    'user_ip_used': self.get_user_ip()
-                }
-                
-                # Cache the result
-                cache_key = self.generate_cache_key(url, 'worst')
-                cache[cache_key] = (result, time.time())
-                
-                return success_response(result)
-                
-        except Exception as e:
-            return error_response(f"Fallback failed: {str(e)[:200]}")
-    
-    def _process_video(self, info, url, platform, start_time, user_headers):
-        """Process single video with detailed format information"""
+    def _process_video(self, info, url, start_time):
+        """Process single video"""
         formats = []
         if 'formats' in info:
-            for fmt in info.get('formats', []):
+            for fmt in info.get('formats', [])[:8]:  # Limit formats
                 if fmt.get('url'):
                     format_info = {
                         'format_id': fmt.get('format_id', 'unknown'),
                         'ext': fmt.get('ext', 'mp4'),
                         'resolution': fmt.get('resolution', 'N/A'),
                         'filesize_mb': round(fmt.get('filesize', 0) / (1024*1024), 2) if fmt.get('filesize') else 0,
-                        'url': fmt['url'],
-                        'vcodec': fmt.get('vcodec', 'unknown'),
-                        'acodec': fmt.get('acodec', 'unknown'),
-                        'protocol': fmt.get('protocol', 'http'),
-                        'has_audio': fmt.get('acodec') != 'none',
-                        'has_video': fmt.get('vcodec') != 'none'
+                        'url': fmt['url']
                     }
-                    
-                    # Add additional info
-                    if fmt.get('format_note'):
-                        format_info['note'] = fmt.get('format_note')
-                    if fmt.get('tbr'):
-                        format_info['bitrate_kbps'] = fmt.get('tbr')
-                    
                     formats.append(format_info)
         
         # Sort by filesize
         formats.sort(key=lambda x: x.get('filesize_mb', 0), reverse=True)
         
-        # Get best URLs for different qualities
-        best_urls = {}
-        for fmt in formats[:5]:  # Top 5 formats
-            quality = self._get_quality_label(fmt)
-            if quality not in best_urls:
-                best_urls[quality] = {
-                    'url': fmt['url'],
-                    'size_mb': fmt['filesize_mb'],
-                    'format_id': fmt['format_id']
-                }
-        
         result = {
             'type': 'video',
-            'platform': platform,
+            'platform': self._detect_platform(url),
             'title': info.get('title', 'Unknown'),
             'duration': info.get('duration', 0),
             'duration_formatted': self._format_duration(info.get('duration', 0)),
             'thumbnail': info.get('thumbnail'),
             'uploader': info.get('uploader', 'Unknown'),
-            'uploader_id': info.get('uploader_id'),
-            'view_count': info.get('view_count'),
-            'like_count': info.get('like_count'),
-            'upload_date': info.get('upload_date'),
-            
-            # Format information
-            'total_formats': len(formats),
-            'formats': formats[:10],  # Limit to 10 formats
-            'best_urls': best_urls,
-            
-            # Additional info
-            'video_id': info.get('id'),
+            'formats': formats[:3],  # Limit to 3 formats for Vercel
             'webpage_url': info.get('webpage_url'),
-            
-            # Technical info
             'processing_time': round(time.time() - start_time, 2),
-            'user_ip_used': self.get_user_ip(),
-            'headers_used': {k: v for k, v in user_headers.items() if k in ['User-Agent', 'X-Forwarded-For']}
         }
         
         # Cache the result
         cache_key = self.generate_cache_key(url, 'best')
         cache[cache_key] = (result, time.time())
+        cleanup_cache()
         
         return success_response(result)
     
-    def _process_playlist(self, info, url, platform, start_time, user_headers):
-        """Process playlist with detailed video information"""
+    def _process_playlist(self, info, url, start_time):
+        """Process playlist"""
         videos = []
         
-        # Limit to 10 videos for cloud deployment
-        max_videos = 10
-        
-        for idx, entry in enumerate(info.get('entries', [])[:max_videos]):
+        # Limit to 3 videos for Vercel
+        for idx, entry in enumerate(info.get('entries', [])[:3]):
             if entry:
                 videos.append({
                     'index': idx + 1,
-                    'title': entry.get('title', f'Video {idx+1}'),
+                    'title': entry.get('title', f'Video {idx+1}')[:50],
                     'duration': entry.get('duration', 0),
-                    'duration_formatted': self._format_duration(entry.get('duration', 0)),
-                    'uploader': entry.get('uploader', 'Unknown'),
                     'video_id': entry.get('id'),
-                    'thumbnail': entry.get('thumbnail'),
-                    'view_count': entry.get('view_count')
                 })
         
         result = {
             'type': 'playlist',
-            'platform': platform,
-            'playlist_title': info.get('title', 'Unknown Playlist'),
-            'playlist_id': info.get('id'),
-            'uploader': info.get('uploader', 'Unknown'),
+            'platform': self._detect_platform(url),
+            'playlist_title': info.get('title', 'Unknown Playlist')[:100],
             'video_count': len(videos),
             'videos': videos,
             'processing_time': round(time.time() - start_time, 2),
-            'user_ip_used': self.get_user_ip()
         }
         
         # Cache the result
         cache_key = self.generate_cache_key(url, 'best')
         cache[cache_key] = (result, time.time())
+        cleanup_cache()
         
         return success_response(result)
     
@@ -333,62 +223,18 @@ class AdvancedCloudDownloader:
         url_lower = url.lower()
         if 'youtube.com' in url_lower or 'youtu.be' in url_lower:
             return 'YouTube'
-        elif 'instagram.com' in url_lower or 'instagr.am' in url_lower:
+        elif 'instagram.com' in url_lower:
             return 'Instagram'
-        elif 'twitter.com' in url_lower or 'x.com' in url_lower:
-            return 'Twitter/X'
-        elif 'facebook.com' in url_lower or 'fb.watch' in url_lower:
-            return 'Facebook'
         elif 'tiktok.com' in url_lower:
             return 'TikTok'
-        elif 'reddit.com' in url_lower:
-            return 'Reddit'
-        elif 'likee.video' in url_lower or 'likee.com' in url_lower:
-            return 'Likee'
-        elif 'snapchat.com' in url_lower:
-            return 'Snapchat'
-        elif 'pinterest.com' in url_lower:
-            return 'Pinterest'
-        elif 'twitch.tv' in url_lower:
-            return 'Twitch'
-        elif 'dailymotion.com' in url_lower:
-            return 'DailyMotion'
-        elif 'vimeo.com' in url_lower:
-            return 'Vimeo'
-        return 'Unknown'
-    
-    def _get_quality_label(self, fmt):
-        """Get quality label"""
-        if fmt.get('format_note'):
-            return fmt['format_note']
-        
-        resolution = fmt.get('resolution', '')
-        if 'x' in resolution:
-            try:
-                height = int(resolution.split('x')[1])
-                if height >= 2160:
-                    return '4K'
-                elif height >= 1440:
-                    return '1440p'
-                elif height >= 1080:
-                    return '1080p'
-                elif height >= 720:
-                    return '720p'
-                elif height >= 480:
-                    return '480p'
-                elif height >= 360:
-                    return '360p'
-                elif height >= 240:
-                    return '240p'
-                elif height >= 144:
-                    return '144p'
-            except:
-                pass
-        
-        return 'unknown'
+        elif 'twitter.com' in url_lower or 'x.com' in url_lower:
+            return 'Twitter/X'
+        elif 'facebook.com' in url_lower:
+            return 'Facebook'
+        return 'Other'
     
     def _format_duration(self, seconds):
-        """Format duration in seconds to HH:MM:SS"""
+        """Format duration in seconds to MM:SS or HH:MM:SS"""
         if not seconds:
             return "00:00"
         
@@ -405,71 +251,18 @@ downloader = AdvancedCloudDownloader()
 
 @app.route('/')
 def index():
-    """Homepage with examples for different platforms"""
-    user_ip = downloader.get_user_ip()
-    
-    examples = {
-        "your_ip": user_ip,
-        "note": "All downloads use YOUR IP address to avoid blocking",
-        "how_to_use": "Add ?url=YOUR_URL to /download endpoint",
-        "example_endpoints": {
-            "download": "/download?url=YOUTUBE_URL",
-            "formats": "/formats?url=YOUTUBE_URL",
-            "info": "/info?url=YOUTUBE_URL",
-            "test": "/test",
-            "status": "/status"
-        },
-        "platform_examples": {
-            "youtube": {
-                "video": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
-                "short": "https://youtu.be/dQw4w9WgXcQ",
-                "playlist": "https://www.youtube.com/playlist?list=PLx0sYbCqOb8TBPRdmBHs5Iftvv9TPboYG"
-            },
-            "instagram": {
-                "post": "https://www.instagram.com/p/Cz9R3PYrZJQ/",
-                "reel": "https://www.instagram.com/reel/C0_8K_3MhQm/",
-                "story": "https://www.instagram.com/stories/highlights/123456789/"
-            },
-            "tiktok": {
-                "video": "https://www.tiktok.com/@example/video/1234567890123456789",
-                "direct": "https://vt.tiktok.com/ZS8LqX1qQ/"
-            },
-            "twitter": {
-                "tweet": "https://twitter.com/example/status/1234567890123456789",
-                "x_video": "https://x.com/example/status/1234567890123456789"
-            },
-            "facebook": {
-                "video": "https://www.facebook.com/example/videos/1234567890123456/",
-                "reel": "https://www.facebook.com/reel/1234567890123456"
-            },
-            "reddit": {
-                "video": "https://www.reddit.com/r/videos/comments/abc123/funny_video/",
-                "clip": "https://v.redd.it/abc123def456"
-            },
-            "twitch": {
-                "clip": "https://clips.twitch.tv/ClumsyVibrantAxePeteZaroll",
-                "vod": "https://www.twitch.tv/videos/123456789"
-            },
-            "dailymotion": "https://www.dailymotion.com/video/x8yzabc",
-            "vimeo": "https://vimeo.com/123456789"
-        },
-        "api_usage_examples": [
-            "/download?url=https://www.youtube.com/watch?v=dQw4w9WgXcQ",
-            "/download?url=https://www.instagram.com/p/Cz9R3PYrZJQ/&format=best",
-            "/formats?url=https://www.tiktok.com/@example/video/1234567890123456789",
-            "/info?url=https://twitter.com/example/status/1234567890123456789"
-        ],
-        "supported_formats": ["mp4", "webm", "mkv", "mov", "avi", "flv", "3gp"],
-        "quality_options": ["best", "worst", "bestvideo", "bestaudio", "2160", "1440", "1080", "720", "480", "360", "240"],
-        "note_about_blocking": "Some platforms may block cloud servers. Using your IP helps but local usage is best for reliability."
-    }
-    
+    """Homepage"""
     return jsonify({
         "developer": DEVELOPER,
-        "message": "Advanced Social Media Downloader API",
-        "your_ip": user_ip,
+        "message": "Social Media Downloader API",
         "timestamp": datetime.utcnow().isoformat(),
-        "data": examples
+        "endpoints": {
+            "download": "/download?url=YOUR_URL",
+            "formats": "/formats?url=YOUR_URL",
+            "info": "/info?url=YOUR_URL",
+            "test": "/test"
+        },
+        "example": "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
     })
 
 @app.route('/download')
@@ -477,7 +270,7 @@ def download():
     """Main download endpoint"""
     url = request.args.get('url')
     if not url:
-        return jsonify(error_response("URL parameter is required. Example: /download?url=https://youtube.com/watch?v=EXAMPLE")), 400
+        return jsonify(error_response("URL parameter is required")), 400
     
     format_type = request.args.get('format', 'best')
     
@@ -485,25 +278,24 @@ def download():
         result = downloader.process_url(url, format_type)
         return jsonify(result)
     except Exception as e:
-        return jsonify(error_response(f"Server error: {str(e)[:200]}")), 500
+        return jsonify(error_response("Internal server error")), 500
 
 @app.route('/formats')
 def formats():
-    """Get all available formats"""
+    """Get available formats"""
     url = request.args.get('url')
     if not url:
-        return jsonify(error_response("URL parameter is required. Example: /formats?url=https://youtube.com/watch?v=EXAMPLE")), 400
+        return jsonify(error_response("URL parameter is required")), 400
     
     try:
         user_headers = downloader.get_user_headers()
         
         ydl_opts = {
             'quiet': True,
-            'no_warnings': True,
             'simulate': True,
             'skip_download': True,
-            'listformats': True,
-            'http_headers': user_headers
+            'http_headers': user_headers,
+            'listformats': True
         }
         
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -511,44 +303,37 @@ def formats():
             
             formats_list = []
             if 'formats' in info:
-                for fmt in info['formats']:
+                for fmt in info['formats'][:6]:  # Limit
                     formats_list.append({
                         'id': fmt.get('format_id'),
                         'ext': fmt.get('ext'),
                         'resolution': fmt.get('resolution'),
-                        'fps': fmt.get('fps'),
                         'filesize_mb': round(fmt.get('filesize', 0) / (1024*1024), 2) if fmt.get('filesize') else 0,
-                        'vcodec': fmt.get('vcodec'),
-                        'acodec': fmt.get('acodec'),
-                        'protocol': fmt.get('protocol')
                     })
             
             result = {
                 'url': url,
                 'title': info.get('title'),
-                'formats_count': len(formats_list),
-                'formats': formats_list[:20],  # Limit to 20 formats
-                'your_ip': downloader.get_user_ip()
+                'formats': formats_list,
             }
             
             return jsonify(success_response(result))
             
     except Exception as e:
-        return jsonify(error_response(f"Failed to get formats: {str(e)[:200]}")), 500
+        return jsonify(error_response("Failed to get formats")), 500
 
 @app.route('/info')
 def info():
-    """Get video info only"""
+    """Get video info"""
     url = request.args.get('url')
     if not url:
-        return jsonify(error_response("URL parameter is required. Example: /info?url=https://youtube.com/watch?v=EXAMPLE")), 400
+        return jsonify(error_response("URL parameter is required")), 400
     
     try:
         user_headers = downloader.get_user_headers()
         
         ydl_opts = {
             'quiet': True,
-            'no_warnings': True,
             'simulate': True,
             'skip_download': True,
             'http_headers': user_headers
@@ -561,56 +346,51 @@ def info():
                 'title': info.get('title'),
                 'duration': info.get('duration'),
                 'uploader': info.get('uploader'),
-                'upload_date': info.get('upload_date'),
                 'view_count': info.get('view_count'),
-                'like_count': info.get('like_count'),
                 'thumbnail': info.get('thumbnail'),
-                'webpage_url': info.get('webpage_url'),
-                'your_ip': downloader.get_user_ip()
+                'platform': downloader._detect_platform(url)
             }
             
             return jsonify(success_response(result))
             
     except Exception as e:
-        return jsonify(error_response(f"Failed to get info: {str(e)[:200]}")), 500
+        return jsonify(error_response("Failed to get info")), 500
 
 @app.route('/test')
 def test():
     """Test endpoint"""
     return jsonify({
+        "status": "active",
         "developer": DEVELOPER,
-        "status": "API is running",
         "timestamp": datetime.utcnow().isoformat(),
-        "your_ip": downloader.get_user_ip(),
-        "user_agent": request.headers.get('User-Agent'),
-        "headers": {k: v for k, v in request.headers.items() if k in ['CF-Connecting-IP', 'X-Forwarded-For', 'X-Real-IP']},
-        "note": "Using your IP address for all downloads"
+        "environment": os.getenv('VERCEL_ENV', 'development'),
+        "cache_size": len(cache)
     })
 
-@app.route('/status')
-def status():
-    """API status"""
+@app.route('/clear-cache')
+def clear_cache():
+    """Clear cache endpoint"""
+    global cache
+    cache.clear()
     return jsonify({
-        "status": "online",
-        "developer": DEVELOPER,
-        "cache_size": len(cache),
-        "timestamp": datetime.utcnow().isoformat(),
-        "server_time": time.time()
+        "success": True,
+        "message": "Cache cleared",
+        "timestamp": datetime.utcnow().isoformat()
     })
 
 # Error handlers
 @app.errorhandler(404)
 def not_found(e):
-    return jsonify(error_response("Endpoint not found. Try / for examples")), 404
+    return jsonify(error_response("Endpoint not found. Try / for available endpoints")), 404
 
 @app.errorhandler(500)
 def server_error(e):
-    return jsonify(error_response("Internal server error. Try again or check your URL")), 500
+    return jsonify(error_response("Internal server error")), 500
 
 @app.errorhandler(400)
 def bad_request(e):
     return jsonify(error_response("Bad request. Check your parameters")), 400
 
-# This is important for Vercel - it needs the 'app' variable
+# This is needed for Vercel
 if __name__ == '__main__':
-    app.run(debug=False)
+    app.run(debug=False, host='0.0.0.0', port=3000)
