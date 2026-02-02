@@ -46,7 +46,10 @@ class AdvancedCloudDownloader:
         
     def get_user_ip(self):
         """Extract user's IP from request headers"""
-        ip = request.headers.get('X-Forwarded-For', '').split(',')[0].strip()
+        # For Vercel, use CF-Connecting-IP or X-Real-IP
+        ip = request.headers.get('CF-Connecting-IP', '')
+        if not ip:
+            ip = request.headers.get('X-Forwarded-For', '').split(',')[0].strip()
         if not ip:
             ip = request.headers.get('X-Real-IP', '')
         if not ip:
@@ -73,6 +76,7 @@ class AdvancedCloudDownloader:
             'Cache-Control': 'max-age=0',
             'X-Forwarded-For': user_ip,
             'X-Real-IP': user_ip,
+            'CF-Connecting-IP': user_ip,
             'Referer': 'https://www.google.com/',
             'Origin': 'https://www.google.com'
         }
@@ -337,6 +341,20 @@ class AdvancedCloudDownloader:
             return 'Facebook'
         elif 'tiktok.com' in url_lower:
             return 'TikTok'
+        elif 'reddit.com' in url_lower:
+            return 'Reddit'
+        elif 'likee.video' in url_lower or 'likee.com' in url_lower:
+            return 'Likee'
+        elif 'snapchat.com' in url_lower:
+            return 'Snapchat'
+        elif 'pinterest.com' in url_lower:
+            return 'Pinterest'
+        elif 'twitch.tv' in url_lower:
+            return 'Twitch'
+        elif 'dailymotion.com' in url_lower:
+            return 'DailyMotion'
+        elif 'vimeo.com' in url_lower:
+            return 'Vimeo'
         return 'Unknown'
     
     def _get_quality_label(self, fmt):
@@ -387,21 +405,71 @@ downloader = AdvancedCloudDownloader()
 
 @app.route('/')
 def index():
+    """Homepage with examples for different platforms"""
+    user_ip = downloader.get_user_ip()
+    
+    examples = {
+        "your_ip": user_ip,
+        "note": "All downloads use YOUR IP address to avoid blocking",
+        "how_to_use": "Add ?url=YOUR_URL to /download endpoint",
+        "example_endpoints": {
+            "download": "/download?url=YOUTUBE_URL",
+            "formats": "/formats?url=YOUTUBE_URL",
+            "info": "/info?url=YOUTUBE_URL",
+            "test": "/test",
+            "status": "/status"
+        },
+        "platform_examples": {
+            "youtube": {
+                "video": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+                "short": "https://youtu.be/dQw4w9WgXcQ",
+                "playlist": "https://www.youtube.com/playlist?list=PLx0sYbCqOb8TBPRdmBHs5Iftvv9TPboYG"
+            },
+            "instagram": {
+                "post": "https://www.instagram.com/p/Cz9R3PYrZJQ/",
+                "reel": "https://www.instagram.com/reel/C0_8K_3MhQm/",
+                "story": "https://www.instagram.com/stories/highlights/123456789/"
+            },
+            "tiktok": {
+                "video": "https://www.tiktok.com/@example/video/1234567890123456789",
+                "direct": "https://vt.tiktok.com/ZS8LqX1qQ/"
+            },
+            "twitter": {
+                "tweet": "https://twitter.com/example/status/1234567890123456789",
+                "x_video": "https://x.com/example/status/1234567890123456789"
+            },
+            "facebook": {
+                "video": "https://www.facebook.com/example/videos/1234567890123456/",
+                "reel": "https://www.facebook.com/reel/1234567890123456"
+            },
+            "reddit": {
+                "video": "https://www.reddit.com/r/videos/comments/abc123/funny_video/",
+                "clip": "https://v.redd.it/abc123def456"
+            },
+            "twitch": {
+                "clip": "https://clips.twitch.tv/ClumsyVibrantAxePeteZaroll",
+                "vod": "https://www.twitch.tv/videos/123456789"
+            },
+            "dailymotion": "https://www.dailymotion.com/video/x8yzabc",
+            "vimeo": "https://vimeo.com/123456789"
+        },
+        "api_usage_examples": [
+            "/download?url=https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+            "/download?url=https://www.instagram.com/p/Cz9R3PYrZJQ/&format=best",
+            "/formats?url=https://www.tiktok.com/@example/video/1234567890123456789",
+            "/info?url=https://twitter.com/example/status/1234567890123456789"
+        ],
+        "supported_formats": ["mp4", "webm", "mkv", "mov", "avi", "flv", "3gp"],
+        "quality_options": ["best", "worst", "bestvideo", "bestaudio", "2160", "1440", "1080", "720", "480", "360", "240"],
+        "note_about_blocking": "Some platforms may block cloud servers. Using your IP helps but local usage is best for reliability."
+    }
+    
     return jsonify({
         "developer": DEVELOPER,
         "message": "Advanced Social Media Downloader API",
-        "note": "Using user's IP for better access",
-        "your_ip": downloader.get_user_ip(),
-        "endpoints": {
-            "/download": "Download video with details (?url=URL&format=best)",
-            "/formats": "Get all available formats (?url=URL)",
-            "/info": "Get video info only (?url=URL)",
-            "/test": "Test endpoint",
-            "/status": "API status"
-        },
-        "supported_platforms": [
-            "YouTube", "Instagram", "TikTok", "Twitter/X", "Facebook"
-        ]
+        "your_ip": user_ip,
+        "timestamp": datetime.utcnow().isoformat(),
+        "data": examples
     })
 
 @app.route('/download')
@@ -409,19 +477,22 @@ def download():
     """Main download endpoint"""
     url = request.args.get('url')
     if not url:
-        return jsonify(error_response("URL parameter is required")), 400
+        return jsonify(error_response("URL parameter is required. Example: /download?url=https://youtube.com/watch?v=EXAMPLE")), 400
     
     format_type = request.args.get('format', 'best')
     
-    result = downloader.process_url(url, format_type)
-    return jsonify(result)
+    try:
+        result = downloader.process_url(url, format_type)
+        return jsonify(result)
+    except Exception as e:
+        return jsonify(error_response(f"Server error: {str(e)[:200]}")), 500
 
 @app.route('/formats')
 def formats():
     """Get all available formats"""
     url = request.args.get('url')
     if not url:
-        return jsonify(error_response("URL parameter is required")), 400
+        return jsonify(error_response("URL parameter is required. Example: /formats?url=https://youtube.com/watch?v=EXAMPLE")), 400
     
     try:
         user_headers = downloader.get_user_headers()
@@ -470,7 +541,7 @@ def info():
     """Get video info only"""
     url = request.args.get('url')
     if not url:
-        return jsonify(error_response("URL parameter is required")), 400
+        return jsonify(error_response("URL parameter is required. Example: /info?url=https://youtube.com/watch?v=EXAMPLE")), 400
     
     try:
         user_headers = downloader.get_user_headers()
@@ -512,7 +583,8 @@ def test():
         "timestamp": datetime.utcnow().isoformat(),
         "your_ip": downloader.get_user_ip(),
         "user_agent": request.headers.get('User-Agent'),
-        "note": "Using your IP address for downloads"
+        "headers": {k: v for k, v in request.headers.items() if k in ['CF-Connecting-IP', 'X-Forwarded-For', 'X-Real-IP']},
+        "note": "Using your IP address for all downloads"
     })
 
 @app.route('/status')
@@ -522,17 +594,22 @@ def status():
         "status": "online",
         "developer": DEVELOPER,
         "cache_size": len(cache),
-        "timestamp": datetime.utcnow().isoformat()
+        "timestamp": datetime.utcnow().isoformat(),
+        "server_time": time.time()
     })
 
 # Error handlers
 @app.errorhandler(404)
 def not_found(e):
-    return jsonify(error_response("Endpoint not found")), 404
+    return jsonify(error_response("Endpoint not found. Try / for examples")), 404
 
 @app.errorhandler(500)
 def server_error(e):
-    return jsonify(error_response("Internal server error")), 500
+    return jsonify(error_response("Internal server error. Try again or check your URL")), 500
+
+@app.errorhandler(400)
+def bad_request(e):
+    return jsonify(error_response("Bad request. Check your parameters")), 400
 
 # This is important for Vercel - it needs the 'app' variable
 if __name__ == '__main__':
